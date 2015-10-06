@@ -18,6 +18,6 @@ public abstract class SimplePaginatedResult<T> extends PaginatedResult<T> {
 
     @Override
     public String formatHeader(int page, int maxPages) {
-        return ChatColor.YELLOW + this.header + " (page " + page + "/" + maxPages + ")";
+        return ChatColor.AQUA + this.header + ChatColor.GRAY + " (" + ChatColor.DARK_AQUA + "page" + ChatColor.AQUA  + page + ChatColor.DARK_RED +  "/" ChatColor.GREEN + maxPages + ChatColor.GRAY + ")";
     }
 }
