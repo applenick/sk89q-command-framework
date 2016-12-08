@@ -25,6 +25,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -32,6 +33,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import javax.annotation.Nullable;
 
 /**
  * Manager for handling commands. This allows you to easily process commands,
@@ -135,20 +137,10 @@ public abstract class CommandsManager<T> {
      */
     public List<Command> registerMethods(Class<?> cls, Method parent) {
         try {
-            if (getInjector() == null) {
-                return registerMethods(cls, parent, null);
-            } else {
-                Object obj = getInjector().getInstance(cls);
-                return registerMethods(cls, parent, obj);
-            }
-        } catch (InvocationTargetException e) {
-            logger.log(Level.SEVERE, "Failed to register commands", e);
-        } catch (IllegalAccessException e) {
-            logger.log(Level.SEVERE, "Failed to register commands", e);
-        } catch (InstantiationException e) {
-            logger.log(Level.SEVERE, "Failed to register commands", e);
+            return registerMethods(cls, parent, null);
+        } catch (InvocationTargetException | IllegalAccessException | InstantiationException e) {
+            throw new CommandRegistrationException("Failed to register commands in class " + cls.getName(), e);
         }
-        return null;
     }
 
     /**
@@ -159,7 +151,7 @@ public abstract class CommandsManager<T> {
      * @param obj the object whose methods will become commands if they are annotated
      * @return a list of commands
      */
-    private List<Command> registerMethods(Class<?> cls, Method parent, Object obj) {
+    private List<Command> registerMethods(Class<?> cls, Method parent, Object obj) throws IllegalAccessException, InstantiationException, InvocationTargetException {
         Map<String, Method> map;
         List<Command> registered = new ArrayList<Command>();
 
@@ -177,6 +169,12 @@ public abstract class CommandsManager<T> {
                 continue;
             }
 
+            if(!(Void.TYPE.equals(method.getReturnType()) ||
+                 List.class.isAssignableFrom(method.getReturnType()))) {
+                throw new CommandRegistrationException("Command method " + method.getDeclaringClass().getName() + "#" + method.getName() +
+                                                       " must return either void or List<String>");
+            }
+
             boolean isStatic = Modifier.isStatic(method.getModifiers());
 
             Command cmd = method.getAnnotation(Command.class);
@@ -188,9 +186,21 @@ public abstract class CommandsManager<T> {
 
             // We want to be able invoke with an instance
             if (!isStatic) {
-                // Can't register this command if we don't have an instance
-                if (obj == null) {
-                    continue;
+                if(obj == null) {
+                    if(injector != null) {
+                        obj = injector.getInstance(cls);
+                    }
+
+                    if(obj == null) {
+                        String text = "Failed to get an instance of " + cls.getName() +
+                                      " for command method " + method.getDeclaringClass().getName() + "#" + method.getName();
+                        if(injector == null) {
+                            text += " (no Injector is available to create it)";
+                        } else {
+                            text += " (the Injector returned null when asked for one)";
+                        }
+                        throw new CommandRegistrationException(text);
+                    }
                 }
 
                 instances.put(method, obj);
@@ -399,46 +409,71 @@ public abstract class CommandsManager<T> {
      * @throws CommandException thrown when the command throws an error
      */
     public void execute(String cmd, String[] args, T player, Object... methodArgs) throws CommandException {
+        executeMethod(false, cmd, args, player, methodArgs);
+    }
 
+    /**
+     * Attempt to complete a command.
+     *
+     * If null is returned, the server's default completion should be used.
+     * Any non-null return should be used as the completion results, even if empty.
+     */
+    public @Nullable List<String> complete(String cmd, String[] args, T player, Object... methodArgs) {
+        try {
+            return executeMethod(true, cmd, args, player, methodArgs);
+        } catch(CommandException e) {
+            return Collections.emptyList();
+        }
+    }
+
+    private List<String> executeMethod(boolean completing, String cmd, String[] args, T player, Object... methodArgs) throws CommandException {
         String[] newArgs = new String[args.length + 1];
         System.arraycopy(args, 0, newArgs, 1, args.length);
         newArgs[0] = cmd;
         Object[] newMethodArgs = new Object[methodArgs.length + 1];
         System.arraycopy(methodArgs, 0, newMethodArgs, 1, methodArgs.length);
 
-        executeMethod(null, newArgs, player, newMethodArgs, 0);
-    }
-
-    /**
-     * Attempt to execute a command.
-     *
-     * @param args the arguments
-     * @param player the player
-     * @param methodArgs the arguments for the method
-     * @throws CommandException thrown on command error
-     */
-    public void execute(String[] args, T player, Object... methodArgs) throws CommandException {
-        Object[] newMethodArgs = new Object[methodArgs.length + 1];
-        System.arraycopy(methodArgs, 0, newMethodArgs, 1, methodArgs.length);
-        executeMethod(null, args, player, newMethodArgs, 0);
+        return executeMethod(null, completing, newArgs, player, newMethodArgs, 0);
     }
 
     /**
      * Attempt to execute a command.
      *
      * @param parent the parent method
+     * @param completing true if completing the command, false if executing
      * @param args an array of arguments
      * @param player the player
      * @param methodArgs the array of method arguments
      * @param level the depth of the command
+     *
+     * @return A list of completions, or null to use the server's default completion (player names).
+     *         Returning an empty list will prevent any completion from happening.
+     *
      * @throws CommandException thrown on a command error
      */
-    public void executeMethod(Method parent, String[] args, T player, Object[] methodArgs, int level) throws CommandException {
-        String cmdName = args[level];
 
-        Map<String, Method> map = commands.get(parent);
-        Method method = map.get(cmdName.toLowerCase());
+    private List<String> executeMethod(Method parent, boolean completing, String[] args, T player, Object[] methodArgs, int level) throws CommandException {
+        final String cmdName = args[level];
+        final String cmdNameLower = cmdName.toLowerCase();
+        final int argsCount = args.length - 1 - level;
+        final Map<String, Method> map = commands.get(parent);
 
+        if(completing && argsCount == 0) {
+            // Completing with no args means the command itself is being completed.
+            // Gather all matching commands, that the player has permission to run,
+            // and return them as completion options. If a full command is being
+            // completed, it will be returned alone, which will just advance the cursor.
+            final List<String> children = new ArrayList<>();
+            for(Map.Entry<String, Method> entry : map.entrySet()) {
+                final String child = entry.getKey();
+                if(child.toLowerCase().startsWith(cmdNameLower) && hasPermission(entry.getValue(), player)) {
+                    children.add(child);
+                }
+            }
+            return children;
+        }
+
+        final Method method = map.get(cmdNameLower);
         if (method == null) {
             if (parent == null) { // Root
                 throw new UnhandledCommandException();
@@ -448,9 +483,9 @@ public abstract class CommandsManager<T> {
             }
         }
 
-        checkPermission(player, method);
-
-        int argsCount = args.length - 1 - level;
+        if(!hasPermission(method, player)) {
+            throw new CommandPermissionsException();
+        }
 
         // checks if we need to execute the body of the nested command method (false)
         // or display the help what commands are available (true)
@@ -460,26 +495,29 @@ public abstract class CommandsManager<T> {
         //  - /cmd - @NestedCommand(executeBody = true) will go into the else loop and execute code in that method
         //  - /cmd <arg1> <arg2> - @NestedCommand(executeBody = true) will always go to the nested command class
         //  - /cmd <arg1> - @NestedCommand(executeBody = false) will always go to the nested command class not matter the args
-        boolean executeNested = method.isAnnotationPresent(NestedCommand.class)
-                && (argsCount > 0 || !method.getAnnotation(NestedCommand.class).executeBody());
+        final NestedCommand nestedAnnot = method.getAnnotation(NestedCommand.class);
 
-        if (executeNested) {
+        if (nestedAnnot != null && (argsCount > 0 || nestedAnnot.executeBody())) {
             if (argsCount == 0) {
                 throw new MissingNestedCommandException("Sub-command required.",
-                        getNestedUsage(args, level, method, player));
+                                                        getNestedUsage(args, level, method, player));
             } else {
-                executeMethod(method, args, player, methodArgs, level + 1);
+                return executeMethod(method, completing, args, player, methodArgs, level + 1);
             }
         } else if (method.isAnnotationPresent(CommandAlias.class)) {
             CommandAlias aCmd = method.getAnnotation(CommandAlias.class);
-            executeMethod(parent, aCmd.value(), player, methodArgs, level);
+            return executeMethod(parent, completing, aCmd.value(), player, methodArgs, level);
         } else {
             Command cmd = method.getAnnotation(Command.class);
+
+            // If the command method doesn't do completions, return null to indicate that
+            // the default completion (player name) should be used.
+            if(completing && !List.class.isAssignableFrom(method.getReturnType())) return null;
 
             String[] newArgs = new String[args.length - level];
             System.arraycopy(args, level, newArgs, 0, args.length - level);
 
-            final Set<Character> valueFlags = new HashSet<Character>();
+            final Set<Character> valueFlags = new HashSet<>();
 
             char[] flags = cmd.flags().toCharArray();
             Set<Character> newFlags = new HashSet<Character>();
@@ -491,20 +529,22 @@ public abstract class CommandsManager<T> {
                 newFlags.add(flags[i]);
             }
 
-            CommandContext context = new CommandContext(newArgs, valueFlags);
+            CommandContext context = new CommandContext(newArgs, valueFlags, completing);
 
-            if (context.argsLength() < cmd.min()) {
-                throw new CommandUsageException("Too few arguments.", getUsage(args, level, cmd));
-            }
+            if(!completing) {
+                if (context.argsLength() < cmd.min()) {
+                    throw new CommandUsageException("Too few arguments.", getUsage(args, level, cmd));
+                }
 
-            if (cmd.max() != -1 && context.argsLength() > cmd.max()) {
-                throw new CommandUsageException("Too many arguments.", getUsage(args, level, cmd));
-            }
+                if (cmd.max() != -1 && context.argsLength() > cmd.max()) {
+                    throw new CommandUsageException("Too many arguments.", getUsage(args, level, cmd));
+                }
 
-            if (!cmd.anyFlags()) {
-                for (char flag : context.getFlags()) {
-                    if (!newFlags.contains(flag)) {
-                        throw new CommandUsageException("Unknown flag: " + flag, getUsage(args, level, cmd));
+                if (!cmd.anyFlags()) {
+                    for (char flag : context.getFlags()) {
+                        if (!newFlags.contains(flag)) {
+                            throw new CommandUsageException("Unknown flag: " + flag, getUsage(args, level, cmd));
+                        }
                     }
                 }
             }
@@ -513,23 +553,20 @@ public abstract class CommandsManager<T> {
 
             Object instance = instances.get(method);
 
-            invokeMethod(parent, args, player, method, instance, methodArgs, argsCount);
+            // If we get here while completing, it means the method's return type is a List<String>,
+            // and we never want to use the default completion. So if it returns null, convert it to
+            // an empty list.
+            final List<String> completions = invokeMethod(parent, args, player, method, instance, methodArgs, argsCount);
+            return completions != null ? completions : Collections.<String>emptyList();
         }
     }
 
-    protected void checkPermission(T player, Method method) throws CommandException {
-        if (!hasPermission(method, player)) {
-            throw new CommandPermissionsException();
-        }
-    }
-
-    public void invokeMethod(Method parent, String[] args, T player, Method method, Object instance, Object[] methodArgs, int level) throws CommandException {
+    public List<String> invokeMethod(Method parent, String[] args, T player, Method method, Object instance, Object[] methodArgs, int level) throws CommandException {
         try {
-            method.invoke(instance, methodArgs);
-        } catch (IllegalArgumentException e) {
+            return (List<String>) method.invoke(instance, methodArgs);
+        } catch (IllegalArgumentException | IllegalAccessException e) {
             logger.log(Level.SEVERE, "Failed to execute command", e);
-        } catch (IllegalAccessException e) {
-            logger.log(Level.SEVERE, "Failed to execute command", e);
+            return null;
         } catch (InvocationTargetException e) {
             if (e.getCause() instanceof CommandException) {
                 throw (CommandException) e.getCause();

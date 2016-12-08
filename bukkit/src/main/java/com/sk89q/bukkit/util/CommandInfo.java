@@ -27,10 +27,6 @@ public class CommandInfo {
     private final String usage, desc;
     private final String[] permissions;
 
-    public CommandInfo(String usage, String desc, String[] aliases, Object registeredWith) {
-        this(usage, desc, aliases, registeredWith, null);
-    }
-
     public CommandInfo(String usage, String desc, String[] aliases, Object registeredWith, String[] permissions) {
         this.usage = usage;
         this.desc = desc;

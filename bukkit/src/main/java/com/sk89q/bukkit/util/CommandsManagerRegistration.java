@@ -23,11 +23,13 @@ import com.sk89q.minecraft.util.commands.Command;
 import com.sk89q.minecraft.util.commands.CommandPermissions;
 import com.sk89q.minecraft.util.commands.CommandsManager;
 import org.bukkit.command.CommandExecutor;
+import org.bukkit.command.TabCompleter;
 import org.bukkit.plugin.Plugin;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import javax.annotation.Nullable;
 
 /**
  * @author zml2008
@@ -45,6 +47,11 @@ public class CommandsManagerRegistration extends CommandRegistration {
         this.commands = commands;
     }
 
+    public CommandsManagerRegistration(Plugin plugin, CommandExecutor executor, @Nullable TabCompleter completer, CommandsManager<?> commands) {
+        super(plugin, executor, completer);
+        this.commands = commands;
+    }
+
     public boolean register(Class<?> clazz) {
         return registerAll(commands.registerAndReturn(clazz));
     }
@@ -54,8 +61,10 @@ public class CommandsManagerRegistration extends CommandRegistration {
         for (Command command : registered) {
             String[] permissions = null;
             Method cmdMethod = commands.getMethods().get(null).get(command.aliases()[0]);
-            if (cmdMethod != null && cmdMethod.isAnnotationPresent(CommandPermissions.class)) {
-                permissions = cmdMethod.getAnnotation(CommandPermissions.class).value();
+            if(cmdMethod != null) {
+                if(cmdMethod.isAnnotationPresent(CommandPermissions.class)) {
+                    permissions = cmdMethod.getAnnotation(CommandPermissions.class).value();
+                }
             }
 
             toRegister.add(new CommandInfo(command.usage(), command.desc(), command.aliases(), commands, permissions));
